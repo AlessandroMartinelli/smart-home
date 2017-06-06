@@ -359,14 +359,15 @@ PROCESS_THREAD(door_node_temperature_process, ev, data)
 {
 	PROCESS_BEGIN();
 	static struct etimer temperature_timer;
+	etimer_set(&temperature_timer, CLOCK_SECOND*10);
 
 	while(1){
-		etimer_set(&temperature_timer, CLOCK_SECOND*10);
 		PROCESS_WAIT_EVENT();
 		if(etimer_expired(&temperature_timer)){
 			SENSORS_ACTIVATE(sht11_sensor);
 			queue_insert(((sht11_sensor.value(SHT11_SENSOR_TEMP)/10-396)/10));
 			SENSORS_DEACTIVATE(sht11_sensor);
+			etimer_reset(&temperature_timer);
 		}
 	}
 	PROCESS_END();

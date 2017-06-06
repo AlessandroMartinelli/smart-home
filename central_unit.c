@@ -31,6 +31,8 @@
 #include "dev/button-sensor.h"
 #include "net/rime/rime.h"
 #include "string.h" /* For strcmp() */
+#include "dev/serial-line.h"
+#include "stdlib.h"
 #define MAX_COMMAND_ALLOWED 5
 #define MAX_RETRANSMISSIONS 5
 #define PROCESS_EVENT_BUTTON 138
@@ -82,7 +84,8 @@ void show_available_commands(){
 		printf("\n[Serial Port Output]: Commands available are:\n"
 				"1. ALARM ACTIVATE\n"
 				"4. OBTAIN TEMPERATURE MEAN VALUE\n"
-				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n");
+				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n"
+				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n");
 	} else if ((current_status & GATE_UNLOCKED) != 0){
 		// Gate unlocked: we may issue the "GATE LOCK" command
 		printf("\n[Serial Port Output]: Commands available are:\n"
@@ -90,7 +93,8 @@ void show_available_commands(){
 				"2. GATE LOCK\n"
 				"3. OPEN AND AUTOMATICALLY CLOSE GATE AND DOOR\n"
 				"4. OBTAIN TEMPERATURE MEAN VALUE\n"
-				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n");
+				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n"
+				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n");
 	} else {
 		// Gate locked: we may issue the "GATE UNLOCK" command
 		printf("\n[Serial Port Output]: Commands available are:\n"
@@ -98,7 +102,8 @@ void show_available_commands(){
 				"2. GATE UNLOCK\n"
 				"3. OPEN AND AUTOMATICALLY CLOSE GATE AND DOOR\n"
 				"4. OBTAIN TEMPERATURE MEAN VALUE\n"
-				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n");
+				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n"
+				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n");
 	}
 }
 
@@ -134,15 +139,15 @@ AUTOSTART_PROCESSES(&central_unit_button_process, &central_unit_main_process);
 /*---------------------------------------------------------------------------*/
 PROCESS_THREAD(central_unit_button_process, ev, data)
 {
-	static uint8_t ret;
-	static uint8_t button_count;
-	static struct etimer button_timer;
 	PROCESS_EXITHANDLER(broadcast_close(&broadcast));
 	PROCESS_EXITHANDLER(runicast_close(&runicast));
 
 	PROCESS_BEGIN();
 
 	// Initializations
+	uint8_t ret;
+	static uint8_t button_count;
+	static struct etimer button_timer;
 	user_command = process_alloc_event();
 	sensor_message = process_alloc_event();
 	home_status = 0;
@@ -211,6 +216,7 @@ PROCESS_THREAD(central_unit_main_process, ev, data)
 	PROCESS_BEGIN();
 
 	static uint8_t command;
+	char msg[8];
 	// TODO static uint8_t message_type;
 	// TODO char msg;
 
@@ -218,7 +224,7 @@ PROCESS_THREAD(central_unit_main_process, ev, data)
 		PROCESS_WAIT_EVENT();
 		//printf("[central_unit_main]: received event %d, data %s or %d\n", ev, data, data);
 		if(ev == user_command){
-			command = (uint32_t)data;
+			command = (uint8_t)data;
 			// TODO: printf("[cu_main]: received data %d, command %d\n", data, command);
 
 			switch(command){
@@ -344,6 +350,7 @@ PROCESS_THREAD(central_unit_main_process, ev, data)
 					break;
 			}
 		} else if (ev == sensor_message){
+			strcpy(msg, (char*)data); //TODO: rendere tutti i messaggi piu' corti di 1 byte e poi usare msg
 			// TODO printf("[central unit]: got a sensor message! data is %s\n", data);
 			if (strcmp(data, "auto opening stop") == 0){
 				/* auto opening stop message */
@@ -373,6 +380,40 @@ PROCESS_THREAD(central_unit_main_process, ev, data)
 				value[len] = '\0';
 				printf("[Serial Port Output]: Temperature mean value is %s\n", value);
 				// TODO: forse qui ci va lo "show available commands"?
+			} else if((strncmp(msg, "fi", 2)) == 0){
+				printf("[Serial Port Output]: A FIRE HAS BEEN DETECTED! TEMPERATURE %s\n", msg+2);
+				// TODO issue alarm
+				if(!runicast_is_transmitting(&runicast)) {
+					linkaddr_t recv;
+					packetbuf_copyfrom("camoff", 7);
+					recv.u8[0] = 4;
+					recv.u8[1] = 0;
+					printf("%u.%u: sending runicast to address %u.%u\n",
+							linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
+					runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
+				} else {
+					// The previous transmission has not finished yet
+					printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
+				}
+			}
+		} else if(ev == serial_line_event_message){
+			if ((home_status & ALARM_ACTIVE) != 0){
+				printf("[Serial Port Output]: Invalid command\n");
+			} else {
+				strcpy(msg, "th");
+				strcat(msg, (char*)data);
+				if(!runicast_is_transmitting(&runicast)) {
+					linkaddr_t recv;
+					packetbuf_copyfrom(&msg, strlen(msg)+1);
+					recv.u8[0] = 4;
+					recv.u8[1] = 0;
+					printf("%u.%u: sending runicast to address %u.%u\n",
+							linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
+					runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
+				} else {
+					// The previous transmission has not finished yet
+					printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
+				}
 			}
 		}
 	}

@@ -9,8 +9,6 @@
 
 /*
  * TODO:
- * - Stare attenti al fatto che io per ora ho fatto che gli eventi vengono mandati a tutti i processi; tuttavia
- * mandare un evento ad un processo che non e' ancora partito non e' che potrebbe farlo risvegliare?
  * - Mi e' venuto in mente, inoltre, che per fare le cose ammodo dovrei, in tutti i nodi, non solo controllare
  * che ev == TIMER_EVENT (o quel che e') ma anche che sia scaduto il timer che penso io, altrimenti magari scade
  * un altro timer, di sistema o altro, boh. Insomma puliafito nelle lezioni la controllava questa condizione,
