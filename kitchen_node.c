@@ -1,6 +1,6 @@
 // TODO: fill
 /*
- * door_node.c
+ * kitchen_node.c
  *
  *  Created on: 2017-06-06
  *    Modified:
@@ -49,7 +49,7 @@
 static process_event_t message_from_central_unit;
 
 static void recv_runicast(struct runicast_conn *c, const linkaddr_t *from, uint8_t seqno){
-	printf("[kitchen node]: runicast message received from %d.%d: '%s'\n", from->u8[0], from->u8[1], (char *)packetbuf_dataptr());
+	printf("[kitchen node]: runicast message received from %d.%d: '%s', %d\n", from->u8[0], from->u8[1], (char *)packetbuf_dataptr(), *(uint8_t*)packetbuf_dataptr());
 	process_post(NULL, message_from_central_unit, packetbuf_dataptr());
 }
 
@@ -131,7 +131,11 @@ PROCESS_THREAD(kitchen_node_main_process, ev, data)
 		/* Handling of a message coming from the central unit */
 		} else if(ev == message_from_central_unit){
 			strcpy(msg, (char*)data);
+			//printf("[kitchen node]: %d, %d\n", *(int*)data, (int*)data);
+			//uint8_t tmp = *(int*)data;
 			/* Handling of 'change threshold' command */
+			//printf("msg[0] is %c\n", msg[0]);
+
 			if((strncmp(msg, "th", 2)) == 0){
 				long threshold = strtol(msg+2, NULL, 10);
 				// TODO printf("[kitchen node]: received %ld from serial line.\n", threshold);
@@ -150,20 +154,6 @@ PROCESS_THREAD(kitchen_node_main_process, ev, data)
 	PROCESS_END();
 	return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
