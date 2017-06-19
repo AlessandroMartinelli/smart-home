@@ -1,9 +1,7 @@
-// TODO: fill
 /*
  * central_unit.c
  *
  *  Created on: 2017-06-01
- *    Modified: 2017-06-03
  *      Author: Alessandro Martinelli
  */
 
@@ -18,10 +16,15 @@
  * command 5 is for obtaining the light value from the gate node
  */
 
-/* TODO:
- * - Check if it is necessary to deactivate button_sensor each time.
- * - Togliere tutte le stampe di debug
- * - rimuovere i file project_conf.h, se alla fine non sono serviti
+/*
+ * In order to send commands to nodes, the following code are used:
+ * 1: alarm activation
+ * 2: alarm deactivation
+ * 3: auto opening and closing
+ * 4: return measured value (temperature or light)
+ * 5: gate unlocking
+ * 6: gate locking
+ *
  */
 
 
@@ -35,102 +38,115 @@
 #include "stdlib.h"
 #define MAX_COMMAND_ALLOWED 5
 #define MAX_RETRANSMISSIONS 5
-#define PROCESS_EVENT_BUTTON 138
 #define ALARM_ACTIVE			0x80	/* 1 if alarm is active */
 #define AUTO_OPENING			0x40	/* 1 if automatic opening is occurring */
 #define GATE_UNLOCKED			0x20	/* 1 if the gate is unlocked */
+#define DOOR_NODE_ADDR_0		1
+#define DOOR_NODE_ADDR_1		0
+#define GATE_NODE_ADDR_0		2
+#define GATE_NODE_ADDR_1		0
+#define CU_NODE_ADDR_0			3
+#define CU_NODE_ADDR_1			0
+#define KITCHEN_NODE_ADDR_0		4
+#define KITCHEN_NODE_ADDR_1		0
+
+
 // #define STOP_GATE_AUTO_OPENING	0x10	/* 1 if the gate has communicated the end of the auto-opening procedure */
 // #define STOP_DOOR_AUTO_OPENING	0x08	/* 1 if the door has communicated the end of the auto-opening procedure */
 
 
+/*
+ * Event used by the button process to communicate to the main process
+ * that a valid command has been issued (the button has been pressed
+ * a valid number of times
+ */
 static process_event_t user_command;
+
+/*
+ * Event used by the communication callback methods to forward the content
+ * of a sensor-sent message to the main process.
+ */
 static process_event_t sensor_message;
+
+/*
+ * Variable used as an array of flags. Those flags store the state
+ * of the system. They are used to perform operations in a consistent manner
+ * and for printing only the correct subset of the commands as available commands.
+ */
 static uint8_t home_status;
 
-static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from){
-  printf("[central_unit]: broadcast message received from %d.%d: '%s'\n", from->u8[0], from->u8[1], (char *)packetbuf_dataptr());
-}
-
-static void broadcast_sent(struct broadcast_conn *c, int status, int num_tx){
-  printf("[central_unit]: broadcast message sent. Status %d. For this packet, this is transmission number %d\n", status, num_tx);
-}
-
 static void recv_runicast(struct runicast_conn *c, const linkaddr_t *from, uint8_t seqno){
-	printf("[central unit]: runicast message received from %d.%d: '%s'\n", from->u8[0], from->u8[1], (char *)packetbuf_dataptr());
-	process_post(NULL, sensor_message, (char *)packetbuf_dataptr());
+	// printf("[central unit]: runicast message received from %d.%d: '%s'\n", from->u8[0], from->u8[1], (char *)packetbuf_dataptr());
+	process_post(NULL, sensor_message, (char*)packetbuf_dataptr());
 }
 
 static void sent_runicast(struct runicast_conn *c, const linkaddr_t *to, uint8_t retransmissions){
-  printf("[central_unit]: runicast message sent to %d.%d, retransmissions %d\n", to->u8[0], to->u8[1], retransmissions);
+	// printf("[central_unit]: runicast message sent to %d.%d, retransmissions %d\n", to->u8[0], to->u8[1], retransmissions);
 }
 
 static void timedout_runicast(struct runicast_conn *c, const linkaddr_t *to, uint8_t retransmissions){
-  printf("[central_unit]: runicast message timed out when sending to %d.%d, retransmissions %d\n", to->u8[0], to->u8[1], retransmissions);
+	printf("runicast message timed out when sending to %d.%d, retransmissions %d\n", to->u8[0], to->u8[1], retransmissions);
 }
 
-static const struct broadcast_callbacks broadcast_call = {broadcast_recv, broadcast_sent}; //Be careful to the order
+static const struct broadcast_callbacks broadcast_call = {};
 static struct broadcast_conn broadcast;
 static const struct runicast_callbacks runicast_calls = {recv_runicast, sent_runicast, timedout_runicast};
 static struct runicast_conn runicast;
 
+void r_send(void* msg, int len, int rime_addr_0, int rime_addr_1){
+	if(!runicast_is_transmitting(&runicast)) {
+		linkaddr_t recv;
+		packetbuf_copyfrom(msg, len);
+		recv.u8[0] = rime_addr_0;
+		recv.u8[1] = rime_addr_1;
+		// printf("%u.%u: sending runicast to address %u.%u\n", linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
+		runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
+	} else {
+		// The previous transmission has not finished yet
+		printf("It was not possible to issue the command. Try again later\n");
+	}
+}
+
+/*
+ * Prints the available commands in the moments it is called.
+ * The list of available commands depend on the value of the
+ * home_status variable, used to store the system state.
+ */
 void show_available_commands(){
+	// To avoid concurrency problems (e.g. home_status changes value
+	// while the comparisons are performed), his initial value is used.
 	uint8_t current_status = home_status;
 	if ((current_status & ALARM_ACTIVE) != 0){
 		// Alarm active: only "deactive alarm" command is available.
-		printf("\n[Serial Port Output]: Commands available are:\n"
-				"1. ALARM DEACTIVATE\n");
+		printf("\nAvailable comamnds are:\n"
+				"1. ALARM DEACTIVATE\n\n");
 	} else if((current_status & AUTO_OPENING) != 0){
 		// Automatic opening and closing is active: you cannot directly lock/unlock the gate
-		printf("\n[Serial Port Output]: Commands available are:\n"
+		printf("\nAvailable comamnds are:\n"
 				"1. ALARM ACTIVATE\n"
 				"4. OBTAIN TEMPERATURE MEAN VALUE\n"
 				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n"
-				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n");
+				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n\n");
 	} else if ((current_status & GATE_UNLOCKED) != 0){
 		// Gate unlocked: we may issue the "GATE LOCK" command
-		printf("\n[Serial Port Output]: Commands available are:\n"
+		printf("\nAvailable comamnds are:\n"
 				"1. ALARM ACTIVATE\n"
 				"2. GATE LOCK\n"
 				"3. OPEN AND AUTOMATICALLY CLOSE GATE AND DOOR\n"
 				"4. OBTAIN TEMPERATURE MEAN VALUE\n"
 				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n"
-				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n");
+				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n\n");
 	} else {
 		// Gate locked: we may issue the "GATE UNLOCK" command
-		printf("\n[Serial Port Output]: Commands available are:\n"
+		printf("\nAvailable comamnds are:\n"
 				"1. ALARM ACTIVATE\n"
 				"2. GATE UNLOCK\n"
 				"3. OPEN AND AUTOMATICALLY CLOSE GATE AND DOOR\n"
 				"4. OBTAIN TEMPERATURE MEAN VALUE\n"
 				"5. OBTAIN EXTERNAL LIGHT CURRENT VALUE\n"
-				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n");
+				"CHANGE FIRE DETECTION THRESHOLD VIA SERIAL INPUT\n\n");
 	}
 }
-
-/*
-uint8_t hash(char* data){
-	if (strcmp(data, "auto opening stop") == 0){
-		return 1;
-	}
-	else if(strncmp(data, "External") == 0){
-		return 2;
-	}
-	/*
-	else if(strcmp(data, "gate unlocking") == 0){
-		return 3;
-	} else if(strcmp(data, "gate locking") == 0){
-		return 4;
-	} else if(strcmp(data, "auto opening") == 0){
-		return 5;
-	} else if(strcmp(data, "external light") == 0){
-		return 6;
-	}
-
-	else {
-		return 0;
-	}
-}
-*/
 
 /*---------------------------------------------------------------------------*/
 PROCESS(central_unit_button_process, "Central Unit Button Process");
@@ -144,67 +160,59 @@ PROCESS_THREAD(central_unit_button_process, ev, data)
 
 	PROCESS_BEGIN();
 
-	// Initializations
-	uint8_t ret;
-	static uint8_t button_count;
-	static struct etimer button_timer;
+	uint8_t ret;							// stores the return value when needed
+	static uint8_t button_count;			// stores the number of button clicks
+	static struct etimer button_timer;		// timer for waiting for a further button click after the first
+
+	home_status = 0;
 	user_command = process_alloc_event();
 	sensor_message = process_alloc_event();
-	home_status = 0;
 	broadcast_open(&broadcast, 129, &broadcast_call);
 	runicast_open(&runicast, 144, &runicast_calls);
 	SENSORS_ACTIVATE(button_sensor);
+
 	show_available_commands();
 
 	while(1){
-		// TODO printf("[centra_unit]: waiting for a button!\n");
-		// Initialization and waiting for the first button click
+		// Waiting for the first button click
 		button_count=0;
-		PROCESS_WAIT_EVENT_UNTIL(ev == PROCESS_EVENT_BUTTON);
-		// TODO printf("[centra_unit]: first button press!\n");
+		PROCESS_WAIT_EVENT_UNTIL(ev == sensors_event && data == &button_sensor);
+		// First button click, the process wait for another click within 4 seconds
 		button_count++;
 		etimer_set(&button_timer,CLOCK_SECOND*4);
 		while(1){
 			// Wait for the button to be press further or for the timer to elapse
 			PROCESS_WAIT_EVENT();
-			if (ev == PROCESS_EVENT_BUTTON){
-				// TODO printf("[centra_unit]: another button press!\n");
+			if (ev == sensors_event && data == &button_sensor){
 				// The button has been pressed another time
 				button_count++;
 				if (button_count > MAX_COMMAND_ALLOWED){
 					// The button has been pressed more than MAX_COMMAND_ALLOWED times,
-					// thus the count is stopped
-					printf("[Serial Port Output]: Invalid command\n");
+					// thus the timer must be stopped (the counter is reset in the main loop)
+					printf("Invalid command\n");
 					etimer_stop(&button_timer);
 					show_available_commands();
 					break;
 				} else {
-					// The number of clicks of the button is still valid. We wait
-					// for another 4 seconds for button clicks.
+					// The number of button clicks is still valid. Wait again.
 					etimer_restart(&button_timer);
 				}
-			} else if(etimer_expired(&button_timer)){
-				printf("[centra_unit]: the button has been pressed %d times!\n", button_count);
+			} else if(ev == PROCESS_EVENT_TIMER && etimer_expired(&button_timer)){
 				// Timer elapsed. The number of button clicks can be assumed to be
-				// valid, thus this value is sent to the main process for
-				// further elaboration
-				ret = process_post(&central_unit_main_process, user_command, (void*)button_count);
+				// valid. The value is sent to the main process for further elaboration
+				ret = process_post(&central_unit_main_process, user_command, (void*)(int)button_count);
 				if (ret != 0){
 					// Event queue full
-					printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
+					printf("It was not possible to issue the command. Try again later\n");
 					show_available_commands();
 				}
-				//TODO: printf("[cu_button]: command %d sent, %d is returned\n", button_count, ret);
 				break;
-
 			}
 		}
 
 	}
-	//TODO: questa parte qui sotto non viene mai raggiunta, quindi potrei anche toglierla
-	printf("[Serial Port Output]: Ending...\n");
-	SENSORS_DEACTIVATE(button_sensor);
 
+	SENSORS_DEACTIVATE(button_sensor);
 	PROCESS_END();
 	return 0;
 }
@@ -215,217 +223,155 @@ PROCESS_THREAD(central_unit_main_process, ev, data)
 {
 	PROCESS_BEGIN();
 
-	static uint8_t command;
-	char msg[8];
-	// TODO static uint8_t message_type;
-	// TODO char msg;
+	static uint8_t button_count;	// Stores the number of button clicks detected in the button process
+	uint8_t out_command;			// Stores the command to be sent to some node.
+	char in_msg[8];
+	char out_msg[8];
 
 	while(1){
+		// Wait for either
+		// 1) a command (the button has been clicked some times);
+		// 2) a message from a sensor node;
+		// 3) an input from the serial line
 		PROCESS_WAIT_EVENT();
-		//printf("[central_unit_main]: received event %d, data %s or %d\n", ev, data, data);
 		if(ev == user_command){
-			command = (uint8_t)data;
-			// TODO: printf("[cu_main]: received data %d, command %d\n", data, command);
-
-			switch(command){
-			//TODO: I corpi di questi case forse sarebbe il caso di raggrupparli in funzioni, perlomeno quelli complessi.
+			// An user command has been received
+			button_count = (uint8_t)(int)data;
+			switch(button_count){
 				case 1:
-					printf("[cu_main]: handling of command 1\n");
-					// This is the activate/deactivate alarm, it is always possible to issue it.
+					// Activate/deactivate alarm command, it is always possible to issue it.
 					if ((home_status & ALARM_ACTIVE) == 0){
 						// The alarm is off, it has to be turned on.
-						printf("[cu_main]: alarm activation\n");
 						home_status |= ALARM_ACTIVE;
-					    packetbuf_copyfrom("alarm activation", 17);
+						out_command = 1;
+						packetbuf_copyfrom((void*)&out_command, 1);
 					    broadcast_send(&broadcast);
-						// TODO: broadcast message
 					} else {
 						// The alarm is on, it has to be turned off.
-						printf("[cu_main]: alarm deactivation\n");
 						home_status &= ~ALARM_ACTIVE;
-					    packetbuf_copyfrom("alarm deactivation", 19);
+						out_command = 2;
+						packetbuf_copyfrom((void*)&out_command, 1);
 					    broadcast_send(&broadcast);
-						// TODO: broadcast message
 					}
 					show_available_commands();
 					break;
 				case 2:
-					printf("[cu_main]: handling of command 2\n");
-					// This is the lock/unlock command. It is possible to issue it only if
-					// 1. The alarm is deactivated 2. the automatic open-close is not active.
+					// Lock/unlock command. It is possible to issue it only if
+					// 1.the alarm is deactivated, 2.the automatic opening-closing procedure is not active.
 					if (((home_status & ALARM_ACTIVE) != 0) || ((home_status & AUTO_OPENING) != 0)){
-						printf("[Serial Port Output]: Invalid command\n");
+						printf("Invalid command\n");
 					} else {
+						// It is possible to issue the command
 						if ((home_status & GATE_UNLOCKED) == 0){
-							printf("[cu_main]: gate unlocking\n");
+							// the gate is locked, thus it has to be unlocked
 							home_status |= GATE_UNLOCKED;
-							if(!runicast_is_transmitting(&runicast)) {
-							      linkaddr_t recv;
-							      packetbuf_copyfrom("gate unlocking", 15);
-							      recv.u8[0] = 3;
-								  recv.u8[1] = 0;
-							      printf("%u.%u: sending runicast to address %u.%u\n",
-							    		  linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
-							      runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
-							} else {
-								// The previous transmission has not finished yet
-								printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
-							}
+							out_command = 5;
+							r_send((void*)&out_command, sizeof(uint8_t), GATE_NODE_ADDR_0, GATE_NODE_ADDR_1);
 						} else {
-							printf("[cu_main]: gate locking\n");
+							// the gate is unlocked, thus it has to be locked
 							home_status &= ~GATE_UNLOCKED;
-							if(!runicast_is_transmitting(&runicast)) {
-								linkaddr_t recv;
-								packetbuf_copyfrom("gate locking", 13);
-								recv.u8[0] = 3;
-								recv.u8[1] = 0;
-								printf("%u.%u: sending runicast to address %u.%u\n",
-										linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
-								runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
-							} else {
-								// The previous transmission has not finished yet
-								printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
-							}
+							out_command = 6;
+							r_send((void*)&out_command, sizeof(uint8_t), GATE_NODE_ADDR_0, GATE_NODE_ADDR_1);
 						}
 					}
 					show_available_commands();
 					break;
 				case 3:
-					printf("[cu_main]: handling of command 3\n");
+					// Auto opening and closing of gate and door command. It is possible to issue it only if
+					// 1.the alarm is deactivated, 2.the automatic opening-closing procedure is not already active.
 					if (((home_status & ALARM_ACTIVE) != 0) || ((home_status & AUTO_OPENING) != 0)){
-						printf("[Serial Port Output]: Invalid command\n");
+						printf("Invalid command\n");
 					} else {
+						// It is possible to issue the command.
 						home_status |= AUTO_OPENING;
-					    packetbuf_copyfrom("auto opening", 13);
+						out_command = 3;
+						packetbuf_copyfrom((void*)&out_command, 1);
 					    broadcast_send(&broadcast);
-						//TODO: tale bit verra' riportato ad 1 nella gestione del messaggio di risposta,
-						// e solo quando questo e' arrivato da entrambi.
-						// Questo si puo' fare con i bit 4 e 5 di home_status.
-						// Inoltre in tal caso possiamo far partire un timer di ad esempio 30 secondi: quando scade,
-						// possiamo assumere che gate e door si sno richiusi
-						//TODO: qui stara' al nodo cambiare momentaneamente i colori (verde e rosso)
-						// e poi rimetterli a posto, non c'e' bisogno che la CU ne tenga traccia.
 					}
 					show_available_commands();
 					break;
 				case 4:
-					printf("[cu_main]: handling of command 4\n");
+					// Temperature mean command.  It is possible to issue it only if
+					// the alarm is deactivated,
 					if ((home_status & ALARM_ACTIVE) != 0){
-						printf("[Serial Port Output]: Invalid command\n");
+						printf("Invalid command\n");
 					} else {
-						if(!runicast_is_transmitting(&runicast)) {
-							linkaddr_t recv;
-							packetbuf_copyfrom("temperature mean", 17);
-							recv.u8[0] = 2;
-							recv.u8[1] = 0;
-							printf("%u.%u: sending runicast to address %u.%u\n",
-									linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
-							runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
-						} else {
-							// The previous transmission has not finished yet
-							printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
-						}
+						// It is possible to issue the command
+						out_command = 4;
+						r_send((void*)&out_command, sizeof(uint8_t), DOOR_NODE_ADDR_0, DOOR_NODE_ADDR_1);
 					}
 					show_available_commands();
 					break;
 				case 5:
-					printf("[cu_main]: handling of command 5\n");
+					// External light command. It is possible to issue it only if
+					// the alarm is deactivated,
 					if ((home_status & ALARM_ACTIVE) != 0){
-						printf("[Serial Port Output]: Invalid command\n");
+						printf("Invalid command\n");
 					} else {
-						if(!runicast_is_transmitting(&runicast)) {
-							linkaddr_t recv;
-							packetbuf_copyfrom("external light", 15);
-							recv.u8[0] = 3;
-							recv.u8[1] = 0;
-							printf("%u.%u: sending runicast to address %u.%u\n",
-									linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
-							runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
-						} else {
-							// The previous transmission has not finished yet
-							printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
-						}
+						// It is possible to issue the command
+						out_command = 4;
+						r_send((void*)&out_command, sizeof(uint8_t), GATE_NODE_ADDR_0, GATE_NODE_ADDR_1);
 					}
 					show_available_commands();
 					break;
+				default:
+					break;
 			}
 		} else if (ev == sensor_message){
-			strcpy(msg, (char*)data); //TODO: rendere tutti i messaggi piu' corti di 1 byte e poi usare msg
-			// TODO printf("[central unit]: got a sensor message! data is %s\n", data);
-			if (strcmp(data, "auto opening stop") == 0){
-				/* auto opening stop message */
-				// We suppose that, as soon as we receive the
-				// 'auto opening stop' message from even only
-				// one of the two node (gate and door nodes)
-				// we assume that the auto-opening procedure
-				// has terminated for both of them.
-				// TODO printf("[central unit]: Ah, so the auto opening procedure is finished?\n");
+			// A message from a sensor node has been received
+			strcpy(in_msg, (char*)data);
+			if (strcmp(in_msg, "stop") == 0){
+				// Auto opening stop message.
+				// As soon as we receive the 'stop' message from even one
+				// between the gate node and the door node, we assume that
+				// the auto-opening procedure has terminated for both of them.
 				home_status &= ~AUTO_OPENING;
 				show_available_commands();
-			} else if((strncmp(data, "light", 5)) == 0){
-				/* auto opening stop message */
+			} else if((strncmp(in_msg, "li", 2)) == 0){
+				// External light value message. We just show the received value
 				char value[5];
-				uint8_t initial_index = 5;
-				uint8_t len = strlen(data) - initial_index;
-				strncpy(value, data+initial_index, len);
+				uint8_t initial_index = 2;
+				uint8_t len = strlen(in_msg) - initial_index;
+				strncpy(value, in_msg+initial_index, len);
 				value[len] = '\0';
-				printf("[Serial Port Output]: External light is %s\n", value);
-				// TODO: forse qui ci va lo "show available commands"?
-			} else if((strncmp(data, "temp", 4)) == 0){
-				/* auto opening stop message */
+				printf("External light is %s\n", value);
+			} else if((strncmp(in_msg, "tem", 3)) == 0){
+				// Temperature message. We just show the received value
 				char value[5];
-				uint8_t initial_index = 4;
-				uint8_t len = strlen(data) - initial_index;
-				strncpy(value, data+initial_index, len);
+				uint8_t initial_index = 3;
+				uint8_t len = strlen(in_msg) - initial_index;
+				strncpy(value, in_msg+initial_index, len);
 				value[len] = '\0';
-				printf("[Serial Port Output]: Temperature mean value is %s\n", value);
-				// TODO: forse qui ci va lo "show available commands"?
-			} else if((strncmp(msg, "fi", 2)) == 0){
-				printf("[Serial Port Output]: A FIRE HAS BEEN DETECTED! TEMPERATURE %s\n", msg+2);
-				// TODO issue alarm
-				if(!runicast_is_transmitting(&runicast)) {
-					linkaddr_t recv;
-					packetbuf_copyfrom("camoff", 7);
-					recv.u8[0] = 4;
-					recv.u8[1] = 0;
-					printf("%u.%u: sending runicast to address %u.%u\n",
-							linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
-					runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
-				} else {
-					// The previous transmission has not finished yet
-					printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
-				}
+				printf("Temperature mean value is %s\n", value);
+			} else if((strncmp(in_msg, "fi", 2)) == 0){
+				// Fire detected message. We print a message, send the alarm and
+				// issue the command to turn off the camera
+				printf("A FIRE HAS BEEN DETECTED! TEMPERATURE %s\n", in_msg+2);
+
+				home_status |= ALARM_ACTIVE;
+				out_command = 1;
+				packetbuf_copyfrom((void*)&out_command, 1);
+			    broadcast_send(&broadcast);
+			    show_available_commands();
+
+				strcpy(out_msg, "camoff");
+				r_send((void*)&out_msg, strlen(out_msg) + 1, KITCHEN_NODE_ADDR_0, KITCHEN_NODE_ADDR_1);
 			}
 		} else if(ev == serial_line_event_message){
+			// An input from the serial line has arrived. It is possible
+			// to issue this command only if the alarm is deactivated.
 			if ((home_status & ALARM_ACTIVE) != 0){
-				printf("[Serial Port Output]: Invalid command\n");
+				printf("Invalid command\n");
 			} else {
-				strcpy(msg, "th");
-				strcat(msg, (char*)data);
-				if(!runicast_is_transmitting(&runicast)) {
-					linkaddr_t recv;
-					packetbuf_copyfrom(&msg, strlen(msg)+1);
-					recv.u8[0] = 4;
-					recv.u8[1] = 0;
-					printf("%u.%u: sending runicast to address %u.%u\n",
-							linkaddr_node_addr.u8[0], linkaddr_node_addr.u8[1], recv.u8[0], recv.u8[1]);
-					runicast_send(&runicast, &recv, MAX_RETRANSMISSIONS);
-				} else {
-					// The previous transmission has not finished yet
-					printf("[Serial Port Output]: It was not possible to issue the command. Try again later\n");
-				}
+				// It is possible to issue the command
+				strcpy(out_msg, "th");
+				strcat(out_msg, (char*)data);
+				r_send((void*)&out_msg, strlen(out_msg) + 1, KITCHEN_NODE_ADDR_0, KITCHEN_NODE_ADDR_1);
 			}
 		}
 	}
 
-	//TODO: remove this code if it is still here
-	//static struct etimer button_timer;
-	//etimer_set(&button_timer,CLOCK_SECOND*10);
-	//PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&button_timer));
-	//printf("[DEBUG cu_main_process]: Attesa finita, ora ricevo eventi asincroni\n");
-
 	PROCESS_END();
-
 	return 0;
 }
 

@@ -1,9 +1,7 @@
-// TODO: fill
 /*
- * bathroom.c
+ * bathroom_node.c
  *
  *  Created on: 2017-06-06
- *    Modified:
  *      Author: Alessandro Martinelli
  */
 
@@ -14,17 +12,16 @@
 #include "dev/leds.h"
 #include "dev/sht11/sht11-sensor.h"
 #include "random.h"
-//#include <math.h>
 
-#define LOWER_THRESHOLD 			40
-#define UPPER_THRESHOLD 			65
+#define LOWER_THRESHOLD 			35
+#define UPPER_THRESHOLD 			60
 #define RANDOM_MAX_VALUE 			5
 #define SHOWER_ACTIVE				0x80	/* 1 if alarm is active */
 #define VENTILATION_ACTIVE			0x40	/* 1 if automatic opening is occurring */
 #define LOWER_TH_EXCEDEED			0x20	/* 1 if the gate is unlocked */
 #define UPPER_TH_EXCEDEED			0x10	/* 1 if the gate has communicated the end of the auto-opening procedure */
 
-int sensor_humidity(){
+int obtain_humidity(){
 	SENSORS_ACTIVATE(sht11_sensor);
 	int relative_humidity = (sht11_sensor.value(SHT11_SENSOR_HUMIDITY)/164);
 	SENSORS_DEACTIVATE(sht11_sensor);
@@ -42,7 +39,16 @@ int sensor_humidity(){
 	 */
 }
 
+/*
+ * This event is sent, along with the temperature
+ * increase, when the humidity increases.
+ */
 static process_event_t increase_humidity;
+
+/*
+ * This event is sent, along with the temperature
+ * decrease, when the humidity decreases.
+ */
 static process_event_t decrease_humidity;
 
 /*---------------------------------------------------------------------------*/
@@ -55,39 +61,58 @@ PROCESS_THREAD(bathroom_node_main_process, ev, data)
 {
 	PROCESS_BEGIN();
 
+	// Store the humidity current value. When 0 it is not meaningful.
+	static int humidity_percentage;
+
+	/*
+	 * Variable used as an array of flags. Those flags store the state
+	 * of the system. They are used to perform operations in a consistent manner.
+	 */
+	static uint8_t bathroom_status;
+
 	increase_humidity = process_alloc_event();
 	decrease_humidity = process_alloc_event();
-	static int humidity_percentage = 0;
-	static uint8_t bathroom_status = 0;
+
+	// initial value is not meaningful
+	humidity_percentage = 0;
+
+	// at the beginning shower and ventilation are turned off, and no threshold has been exceeded
+	bathroom_status = 0;
+
 	SENSORS_ACTIVATE(button_sensor);
-	// TODO: azzerare tutti i led
 
 	while(1){
 		PROCESS_WAIT_EVENT();
 		if(ev == sensors_event && data == &button_sensor){
+			// Button has been clicked. The shower has been either opened or closed.
 			if((bathroom_status & SHOWER_ACTIVE) == 0){
-				// The shower has been turned on, thus humidity is being produced
+				// The shower is being turned on, thus humidity is being produced
 				bathroom_status |= SHOWER_ACTIVE;
 				process_start(&bathroom_node_shower_process, NULL);
 			} else {
-				// The shower has been turned off. Humidity is no more produced
+				// The shower is being turned off. Humidity is no more produced.
+				// Please note the ventilation system is turned off when the humidity
+				// has fallen below a certain threshold, not when the shower is turned off.
 				bathroom_status &= ~SHOWER_ACTIVE;
 				process_exit(&bathroom_node_shower_process);
 				if((bathroom_status & LOWER_TH_EXCEDEED) == 0){
+					// If the humidity is very low, we consider this value
+					// no more meaningful, and the next time the shower will be turned on,
+					// presumably not before some hours, we will sample this value again.
 					humidity_percentage = 0;
 				}
 			}
 		} else if(ev == increase_humidity){
-			// A humidity rise. This may happen only if the
+			// A humidity increase. This may happen only if the
 			// shower is active; thus, if a spurious event of
 			// this kind occurs when the shower is off, it must be ignored.
 			if((bathroom_status & SHOWER_ACTIVE) != 0){
 				// shower active --> the raise is "valid"
 				if(humidity_percentage == 0){
 					// Initial value is taken from actual sensor
-					humidity_percentage = sensor_humidity();
+					humidity_percentage = obtain_humidity();
 				}
-				humidity_percentage += (uint8_t)data;
+				humidity_percentage += (uint8_t)(int)data;
 				printf("[bathroom node]: humidity has increased, now it is %d\n", humidity_percentage);
 				if(humidity_percentage > UPPER_THRESHOLD){
 					if((bathroom_status & UPPER_TH_EXCEDEED) == 0){
@@ -111,31 +136,35 @@ PROCESS_THREAD(bathroom_node_main_process, ev, data)
 				// it is a spurious event, and must not be taken into account.
 			}
 		} else if(ev == decrease_humidity){
-			// If a user turn off the shower while the ventilation system is active,
-			// the ventilation system has however to complete its work. Thus, it is not
-			// important to check if the shower is currently used or not.
-			humidity_percentage -= (uint8_t)data;
-			printf("[bathroom node]: humidity has decreased, now it is %d\n", humidity_percentage);
-			if(humidity_percentage < LOWER_THRESHOLD){
-				if((bathroom_status & LOWER_TH_EXCEDEED) != 0){
-					// The lower threshold was excedeed until now.
-					// The ventilation system can be stopped
-					bathroom_status &= ~LOWER_TH_EXCEDEED;
-					bathroom_status &= ~VENTILATION_ACTIVE;
-					process_exit(&bathroom_node_ventilation_process);
-					leds_off(LEDS_GREEN);
-					leds_off(LEDS_BLUE);
+			if((bathroom_status & VENTILATION_ACTIVE) != 0){
+				// A humidity decrease. This may happen only if the
+				// ventilation system is active; thus, if a spurious event of
+				// this kind occurs when the ventilation is off, it must be ignored.
+				humidity_percentage -= (uint8_t)(int)data;
+				printf("[bathroom node]: humidity has decreased, now it is %d\n", humidity_percentage);
+				if(humidity_percentage < LOWER_THRESHOLD){
+					if((bathroom_status & LOWER_TH_EXCEDEED) != 0){
+						// The lower threshold was excedeed until now.
+						// The ventilation system can be stopped
+						bathroom_status &= ~LOWER_TH_EXCEDEED;
+						bathroom_status &= ~VENTILATION_ACTIVE;
+						process_exit(&bathroom_node_ventilation_process);
+						leds_off(LEDS_GREEN);
+						leds_off(LEDS_BLUE);
+					}
+				} else if(humidity_percentage < UPPER_THRESHOLD){
+					if((bathroom_status & UPPER_TH_EXCEDEED) != 0){
+						// The upper threshold was excedeed until now.
+						bathroom_status &= ~UPPER_TH_EXCEDEED;
+						leds_off(LEDS_RED);
+					}
 				}
-			} else if(humidity_percentage < UPPER_THRESHOLD){
-				if((bathroom_status & UPPER_TH_EXCEDEED) != 0){
-					// The upper threshold was excedeed until now.
-					bathroom_status &= ~UPPER_TH_EXCEDEED;
-					leds_off(LEDS_RED);
-				}
+			} else {
+				// decrease_humidity event occurred when ventilation already stopped:
+				// it is a spurious event, and must not be taken into account.
 			}
 		}
 	}
-
 	PROCESS_END();
 	return 0;
 }
@@ -143,7 +172,7 @@ PROCESS_THREAD(bathroom_node_main_process, ev, data)
 PROCESS_THREAD(bathroom_node_shower_process, ev, data)
 {
 	PROCESS_BEGIN();
-	printf("[bathroom node]: shower turned on\n");
+	// printf("[bathroom node]: shower turned on\n");
 
 	static uint8_t increase;
 	static struct etimer timer;
@@ -151,13 +180,14 @@ PROCESS_THREAD(bathroom_node_shower_process, ev, data)
 
 	while(1){
 		PROCESS_WAIT_EVENT();
-		if(etimer_expired(&timer)){
+		if(ev == PROCESS_EVENT_TIMER && etimer_expired(&timer)){
+			// incrase has to be at least 1 (to avoid too much 0 value to occurring)
 			increase = ((random_rand()%(RANDOM_MAX_VALUE+1))+1);
-			process_post(&bathroom_node_main_process, increase_humidity, (void*)increase);
+			process_post(&bathroom_node_main_process, increase_humidity, (void*)(int)increase);
 			etimer_restart(&timer);
 		} else if(ev == PROCESS_EVENT_EXIT){
-			printf("[bathroom node]: shower turned off\n");
-			// TODO: maybe here I should stop the timer?
+			// printf("[bathroom node]: shower turned off\n");
+			etimer_stop(&timer);
 		}
 	}
 
@@ -168,7 +198,7 @@ PROCESS_THREAD(bathroom_node_shower_process, ev, data)
 PROCESS_THREAD(bathroom_node_ventilation_process, ev, data)
 {
 	PROCESS_BEGIN();
-	printf("[bathroom node]: ventilation system turned on\n");
+	// printf("[bathroom node]: ventilation system turned on\n");
 
 	static uint8_t decrease;
 	static struct etimer timer;
@@ -176,13 +206,13 @@ PROCESS_THREAD(bathroom_node_ventilation_process, ev, data)
 
 	while(1){
 		PROCESS_WAIT_EVENT();
-		if(etimer_expired(&timer)){
+		if(ev == PROCESS_EVENT_TIMER && etimer_expired(&timer)){
 			decrease = (RANDOM_MAX_VALUE+2);
-			process_post(&bathroom_node_main_process, decrease_humidity, (void*)decrease);
+			process_post(&bathroom_node_main_process, decrease_humidity, (void*)(int)decrease);
 			etimer_restart(&timer);
 		} else if(ev == PROCESS_EVENT_EXIT){
-			printf("[bathroom node]: ventilation system turned off\n");
-			// TODO: maybe here I should stop the timer?
+			// printf("[bathroom node]: ventilation system turned off\n");
+			etimer_stop(&timer);
 		}
 	}
 
