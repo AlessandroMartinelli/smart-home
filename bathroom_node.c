@@ -13,19 +13,69 @@
 #include "dev/sht11/sht11-sensor.h"
 #include "random.h"
 
-#define LOWER_THRESHOLD 			35
-#define UPPER_THRESHOLD 			60
+#define LOWER_THRESHOLD 			130
+#define UPPER_THRESHOLD 			150
 #define RANDOM_MAX_VALUE 			5
 #define SHOWER_ACTIVE				0x80	/* 1 if alarm is active */
 #define VENTILATION_ACTIVE			0x40	/* 1 if automatic opening is occurring */
 #define LOWER_TH_EXCEDEED			0x20	/* 1 if the gate is unlocked */
 #define UPPER_TH_EXCEDEED			0x10	/* 1 if the gate has communicated the end of the auto-opening procedure */
 
+float sht11_TemperatureC(int temprawdata)
+{
+  float _temperature;      // Temperature derived from raw value
+
+  // Conversion coefficients from SHT11 datasheet
+  const float D1 = -39.6;
+  const float D2 =   0.01;
+
+  // Convert raw value to degrees Celsius
+  _temperature = (temprawdata * D2) + D1;
+
+  return (_temperature);
+}
+
 int obtain_humidity(){
+	int temprawdata;
+	int humidityrawdata;
+	float _linearHumidity;       // Humidity with linear correction applied
+	float _correctedHumidity;    // Temperature-corrected humidity
+	float _temperature;          // Raw temperature value
+
+	SENSORS_ACTIVATE(sht11_sensor);
+	humidityrawdata = sht11_sensor.value(SHT11_SENSOR_HUMIDITY);
+	temprawdata = sht11_sensor.value(SHT11_SENSOR_TEMP);
+
+	// Get current temperature for humidity correction
+	_temperature = sht11_TemperatureC(temprawdata);
+	SENSORS_DEACTIVATE(sht11_sensor);
+
+	// Conversion coefficients from SHT15 datasheet
+	const float C1 = -4.0;       // for 12 Bit
+	const float C2 =  0.0405;    // for 12 Bit
+	const float C3 = -0.0000028; // for 12 Bit
+	const float T1 =  0.01;      // for 14 Bit @ 5V
+	const float T2 =  0.00008;   // for 14 Bit @ 5V
+
+	_linearHumidity = C1 + C2 * humidityrawdata + C3 * humidityrawdata * humidityrawdata;
+
+	// Correct humidity value for current temperature
+	_correctedHumidity = (_temperature - 25.0 ) * (T1 + T2 * humidityrawdata) + _linearHumidity;
+
+	float tc = _temperature;
+	float hc = _correctedHumidity;
+	printf("temp:%u.%u\nhumidity:%u.%u\n",(int)tc,((int)(tc*10))%10 , (int)hc,((int)(hc*10))%10);
+
+	return (_correctedHumidity);
+
+	/*
 	SENSORS_ACTIVATE(sht11_sensor);
 	int relative_humidity = (sht11_sensor.value(SHT11_SENSOR_HUMIDITY)/164);
 	SENSORS_DEACTIVATE(sht11_sensor);
 	return relative_humidity;
+	*/
+
+
 	/*
 	 	float adc_value = sht11_sensor.value(SHT11_SENSOR_HUMIDITY)*100;
 		float voltage = (adc_value/4095)*5;
@@ -111,12 +161,13 @@ PROCESS_THREAD(bathroom_node_main_process, ev, data)
 				if(humidity_percentage == 0){
 					// Initial value is taken from actual sensor
 					humidity_percentage = obtain_humidity();
+					printf("[bathroom node]: humidity initial value is %d\n", humidity_percentage);
 				}
 				humidity_percentage += (uint8_t)(int)data;
 				printf("[bathroom node]: humidity has increased, now it is %d\n", humidity_percentage);
 				if(humidity_percentage > UPPER_THRESHOLD){
 					if((bathroom_status & UPPER_TH_EXCEDEED) == 0){
-						// The upper threshold has been excedeed just now.
+						// The upper threshold has been exceeded just now.
 						// The ventilation system has to be started
 						bathroom_status |= UPPER_TH_EXCEDEED;
 						bathroom_status |= VENTILATION_ACTIVE;
@@ -144,7 +195,7 @@ PROCESS_THREAD(bathroom_node_main_process, ev, data)
 				printf("[bathroom node]: humidity has decreased, now it is %d\n", humidity_percentage);
 				if(humidity_percentage < LOWER_THRESHOLD){
 					if((bathroom_status & LOWER_TH_EXCEDEED) != 0){
-						// The lower threshold was excedeed until now.
+						// The lower threshold was being exceeded until now.
 						// The ventilation system can be stopped
 						bathroom_status &= ~LOWER_TH_EXCEDEED;
 						bathroom_status &= ~VENTILATION_ACTIVE;
@@ -181,7 +232,7 @@ PROCESS_THREAD(bathroom_node_shower_process, ev, data)
 	while(1){
 		PROCESS_WAIT_EVENT();
 		if(ev == PROCESS_EVENT_TIMER && etimer_expired(&timer)){
-			// incrase has to be at least 1 (to avoid too much 0 value to occurring)
+			// increase has to be at least 1 (to avoid the occurrence of too much 0 values)
 			increase = ((random_rand()%(RANDOM_MAX_VALUE+1))+1);
 			process_post(&bathroom_node_main_process, increase_humidity, (void*)(int)increase);
 			etimer_restart(&timer);

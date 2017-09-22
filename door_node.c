@@ -311,10 +311,10 @@ PROCESS_THREAD(door_node_opening_blink_process, ev, data)
 	static struct etimer blink_timer;
 	etimer_set(&blink_timer,CLOCK_SECOND*2);
 
-	for(blinked = 1; blinked < 9; blinked++){
+	for(blinked = 1; blinked < 16; blinked++){
 		PROCESS_WAIT_EVENT();
 		if(ev == PROCESS_EVENT_TIMER && etimer_expired(&blink_timer)){
-			if(blinked != 8){
+			if(blinked != 15){
 				etimer_reset(&blink_timer);
 			}
 			if(blinked >= 7){
